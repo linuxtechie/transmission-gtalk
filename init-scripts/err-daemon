@@ -1,0 +1,93 @@
+#!/bin/sh -e
+### BEGIN INIT INFO
+# Provides:          err-daemon
+# Required-Start:    $local_fs $remote_fs $network
+# Required-Stop:     $local_fs $remote_fs $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start or stop the err-daemon.
+### END INIT INFO
+logfile=/tmp/err-daemon.debug.$$.txt
+exec > $logfile 2>&1
+set -x
+echo $*
+LAUNCHOP=$1
+NAME=err-daemon
+DAEMON=/usr/bin/$NAME
+USER=root
+PIDFILE=/var/run/$NAME.pid
+STOP_TIMEOUT=60
+CHDIR=/tmp
+
+export PATH="${PATH:+$PATH:}/sbin"
+
+[ -x $DAEMON ] || exit 0
+
+#[ -e /etc/default/$NAME ] && . /etc/default/$NAME
+ENABLE_DAEMON=1
+
+. /lib/lsb/init-functions
+
+start_daemon () {
+    if [ $ENABLE_DAEMON != 1 ]; then
+        log_progress_msg "(disabled, see /etc/default/${NAME})"
+    else    
+        touch $PIDFILE
+        chown $USER $PIDFILE
+
+        start-stop-daemon --start \
+        --chuid $USER --chdir $CHDIR \
+		    $START_STOP_OPTIONS \
+        --pidfile $PIDFILE \
+        --startas $DAEMON -- --pid-file $PIDFILE $OPTIONS
+        echo $?
+#        --exec $DAEMON -- $OPTIONS
+    fi
+}
+
+case "$1" in
+    start)
+        log_daemon_msg "Starting bittorrent daemon" "$NAME"
+        start_daemon
+        log_end_msg 0
+        ;;
+    stop)
+        log_daemon_msg "Stopping bittorrent daemon" "$NAME"
+        start-stop-daemon --stop --quiet \
+            --pidfile $PIDFILE --retry $STOP_TIMEOUT \
+            --oknodo
+#            --exec $DAEMON --retry $STOP_TIMEOUT \
+#            --oknodo
+        log_end_msg 0
+        ;;
+    reload)
+        log_daemon_msg "Reloading bittorrent daemon" "$NAME"
+        start-stop-daemon --stop --quiet \
+            --pidfile $PIDFILE \
+            --oknodo --signal 1
+#            --exec $DAEMON \
+#            --oknodo --signal 1
+        log_end_msg 0
+        ;;
+    restart|force-reload)
+        log_daemon_msg "Restarting bittorrent daemon" "$NAME"
+        start-stop-daemon --stop --quiet \
+            --pidfile $PIDFILE --retry $STOP_TIMEOUT \
+            --oknodo
+#            --exec $DAEMON --retry $STOP_TIMEOUT \
+#            --oknodo
+        start_daemon
+        log_end_msg 0
+        ;;
+    *)
+        echo "Usage: /etc/init.d/$NAME {start|stop|reload|force-reload|restart}"
+        exit 2
+        ;;
+esac
+
+#cat $logfile  | mail -s "Transmission Daemon $LAUNCHOP: $$" someone@gmail.com
+
+rm $logfile
+
+exit 0
+

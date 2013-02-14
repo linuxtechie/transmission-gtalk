@@ -1,0 +1,15 @@
+*.pyc
+/.idea
+/atlassian-ide-plugin.xml
+/.settings
+nohup.out
+/build
+/dist
+/err.egg-info
+/config/data
+/config/gtalk.log
+transmission-remote-clic
+*.log
+*.z
+data
+/err

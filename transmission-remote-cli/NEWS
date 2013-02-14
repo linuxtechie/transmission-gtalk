@@ -1,0 +1,61 @@
+1.3.1  2012-06-12
+    BUGFIXES:
+        - Fix wrong progress bar placement calculation for two-column
+          characters (kanji)
+
+    - Updated bash-completion script, README.md and screenshots
+
+
+1.3  2012-05-23
+    - Added Bash completion
+    - Estimate time until next ratio milestone is reached
+    - Don't connect to Transmission daemon when imported
+    - Show which versions of Transmission are supported in --version output
+
+
+1.2.2  2012-05-02
+    BUGFIXES:
+        - Handle escape key correctly in Turtle Mode speed limit dialogs
+
+
+1.2.1  2012-04-29
+    BUGFIXES:
+        - Fix crash when enabling compact mode while focusing torrent at
+          bottom
+
+
+1.2  2012-04-25
+    BUGFIXES:
+        - Rewrite of manpage to eliminate warnings and conform to the man
+          macro package
+
+    - Allow filtering of private torrents in main list
+    - Don't reset focus/unfocus after deleting a torrent
+
+
+1.1.1  2012-04-02
+    BUGFIXES:
+        - ACS characters in pieces view look better but are extremely slow in
+          some terminals (rxvt)
+        - Fix UnicodeEncodeError with t['lastAnnounceResult']
+
+
+1.1  2012-02-29
+    BUGFIXES:
+        - Crash when pressing up or down in empty torrent list
+        - Append missing '/' to downloadDir to fix sorting by location
+        - Set individual torrent's seed limit as float, not integer
+        - Encode tracker errors as UTF-8
+
+    - New keybindings:
+        - g/G   Move to top/bottom
+        - C-f/b Move one page forward/backward
+        - C-n/p Move to next/previous item
+        - Space View torrent details
+    - New options in config dialog ('o'):
+        - Turtle Mode Upload/Download Limit
+        - Torrent Title is Progress Bar
+    - Replace upload rate with seed ratio in compact mode.
+    - Show sort order in status line
+    - Use ACS characters in pieces view
+    - More compact status line

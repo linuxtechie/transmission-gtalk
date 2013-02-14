@@ -1,0 +1,56 @@
+import logging
+import os
+import xmpp
+from errbot.botplugin import BotPlugin
+from threading import Timer
+from torrent.tInterface import TorrentInterface
+
+__author__ = 'myself@linuxtechie.com'
+
+from config import CHATROOM_PRESENCE, CHATROOM_FN, HIPCHAT_MODE 
+from config import GTALK_ANNOUNCEMENT_LIST, BOT_DATA_DIR
+
+
+class Announcement(BotPlugin):
+    connected = False
+    
+    def sendMessage(self, message):
+      for rcvr in GTALK_ANNOUNCEMENT_LIST:
+        try:
+          message = xmpp.Message(rcvr, message)
+          message.setAttr('type', 'chat')
+          self.bare_send(message)
+        except Exception:
+          logging.exception("Exception occurred!")
+          
+    
+    
+    def do_announcement(self):
+        obj = TorrentInterface(BOT_DATA_DIR + os.sep + 'transmission.db', self.sendMessage)
+        obj.process()
+        obj.sendMessages()
+        
+
+    def keep_alive(self):
+        # logging.debug('Keep alive sent')
+        if HIPCHAT_MODE:
+          self.send('nobody', ' ', message_type='groupchat') # hack from hipchat itself
+        else:
+          pres = xmpp.Presence()
+          self.bare_send(pres)
+          self.do_announcement()
+
+        self.t = Timer(10.0, self.keep_alive)
+        self.t.setDaemon(True) # so it is not locking on exit
+        self.t.start()
+        
+    def callback_connect(self):
+        logging.info('Callback_connect')
+        if not self.connected:
+            self.connected = True
+            for room in CHATROOM_PRESENCE:
+                logging.info('Join room ' + room)
+                self.join_room(room, CHATROOM_FN)
+
+            logging.info('Start keep alive')
+            self.keep_alive()

@@ -1,0 +1,6 @@
+[Core]
+Name = Magnet
+Module = magnet
+
+[Documentation]
+Description = Add magnet to currently running transmission-daemon

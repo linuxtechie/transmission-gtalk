@@ -1,0 +1,69 @@
+.\"Created with GNOME Manpages Editor Wizard
+.\"http://sourceforge.net/projects/gmanedit2
+.TH transmission-remote-cli 1 "April 22, 2012" "" "transmission-remote-cli"
+
+.SH NAME
+transmission-remote-cli \- a console client for the Transmission BitTorrent
+client
+
+.SH SYNOPSIS
+.B transmission-remote-cli
+.RI [ options ]
+.RI [ filename-or-URL ] 
+.br
+
+.SH DESCRIPTION
+.B transmission-remote-cli
+is a curses interface for the daemon of the BitTorrent client Transmission.
+
+.SH OPTIONS
+.B
+.IP "--version"
+Show version number and exit
+.B
+.IP "-h --help"
+Show usage information and a list of options
+.B
+.IP "-c \fICONNECTION\fB --connect=\fICONNECTION\fR"
+Point to the server. \fICONNECTION\fR must match the following pattern:
+.br
+[username:password@]host[:port][path]
+.br
+Default: localhost:9091
+.B
+.IP "-s --ssl"
+Use SSL to connect to the server.
+.br
+Default: don't use SSL
+.B
+.IP "--create-config"
+Create configuration file with default values.
+.br
+\fINOTE:\fR A config file won't be created unless you provide this option at
+least once. After that, it is rewritten whenever transmission-remote-cli
+exits.
+.IP "-f \fICONFIGFILE\fB --config=\fICONFIGFILE\fR"
+Set path to configuration file.
+.br
+Default: ~/.config/transmission-remote-cli/settings.cfg
+.B
+.IP "-n --netrc"
+Get authentication info from ~/.netrc.
+.B
+.IP "-- \fIOPTIONS\fR"
+Use the known server connection to pass \fIOPTIONS\fR on to
+\fBtransmission-remote\fR.
+.B
+
+.SH FILES
+transmission-remote-cli overwrites the configuration file on exit. Keep that
+in mind if you edit it manually.
+
+.SH SEE ALSO
+.BR transmission-create (1),
+.BR transmission-daemon (1),
+.BR transmission-edit (1),
+.BR transmission-gtk (1),
+.BR transmission-qt (1),
+.BR transmission-remote (1),
+.BR transmission-show (1).

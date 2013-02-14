@@ -1,0 +1,1121 @@
+#!/usr/bin/env python
+########################################################################
+# This is transmission-remote-cli, whereas 'cli' stands for 'Curses    #
+# Luminous Interface', a client for the daemon of the BitTorrent       #
+# client Transmission.                                                 #
+#                                                                      #
+# This program is free software: you can redistribute it and/or modify #
+# it under the terms of the GNU General Public License as published by #
+# the Free Software Foundation, either version 3 of the License, or    #
+# (at your option) any later version.                                  #
+#                                                                      #
+# This program is distributed in the hope that it will be useful,      #
+# but WITHOUT ANY WARRANTY; without even the implied warranty of       #
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the        #
+# GNU General Public License for more details:                         #
+# http://www.gnu.org/licenses/gpl-3.0.txt                              #
+########################################################################
+
+VERSION = '1.3.1'
+
+TRNSM_VERSION_MIN = '1.90'
+TRNSM_VERSION_MAX = '2.52'
+RPC_VERSION_MIN = 8
+RPC_VERSION_MAX = 14
+
+# error codes
+CONNECTION_ERROR = 1
+JSON_ERROR       = 2
+CONFIGFILE_ERROR = 3
+
+
+# use simplejson if available because it seems to be faster
+try:
+    import simplejson as json
+except ImportError:
+    try:
+        # Python 2.6 comes with a json module ...
+        import json
+        # ...but there is also an old json module that doesn't support .loads/.dumps.
+        json.dumps ; json.dumps
+    except (ImportError,AttributeError):
+        quit("Please install simplejson or Python 2.6 or higher.")
+
+import time
+import re
+import base64
+import httplib
+import urllib2
+import socket
+try:
+    import curses
+    CURSES_AVAILABLE=True
+except ImportError:
+    print "curses not available"
+    CURSES_AVAILABLE=False
+socket.setdefaulttimeout(None)
+import ConfigParser
+from optparse import OptionParser, SUPPRESS_HELP
+import sys
+import os
+import signal
+import unicodedata
+import locale
+locale.setlocale(locale.LC_ALL, '')
+from textwrap import wrap
+from subprocess import call
+import netrc
+
+
+# optional features provided by non-standard modules
+features = {'dns':False, 'geoip':False, 'ipy':False}
+try:   import adns; features['dns'] = True     # resolve IP to host name
+except ImportError: features['dns'] = False
+
+try:   import GeoIP; features['geoip'] = True  # show country peer seems to be in
+except ImportError:  features['geoip'] = False
+
+try:   import IPy;  features['ipy'] = True  # extract ipv4 from ipv6 addresses
+except ImportError: features['ipy'] = False
+
+
+if features['ipy']:
+    IPV6_RANGE_6TO4 = IPy.IP('2002::/16')
+    IPV6_RANGE_TEREDO = IPy.IP('2001::/32')
+    IPV4_ONES = 0xffffffff
+
+if features['geoip']:
+    def country_code_by_addr_vany(geo_ip, geo_ip6, addr):
+        if '.' in addr:
+            return geo_ip.country_code_by_addr(addr)
+        if not ':' in addr:
+            return None
+        if features['ipy']:
+            ip = IPy.IP(addr)
+            if ip in IPV6_RANGE_6TO4:
+              addr = str(IPy.IP(ip.int() >> 80 & IPV4_ONES))
+              return geo_ip.country_code_by_addr(addr)
+            elif ip in IPV6_RANGE_TEREDO:
+              addr = str(IPy.IP(ip.int() & IPV4_ONES ^ IPV4_ONES))
+              return geo_ip.country_code_by_addr(addr)
+        if hasattr(geo_ip6, 'country_code_by_addr_v6'):
+            return geo_ip6.country_code_by_addr_v6(addr)
+
+
+# define config defaults
+config = ConfigParser.SafeConfigParser()
+config.add_section('Connection')
+config.set('Connection', 'password', '')
+config.set('Connection', 'username', '')
+config.set('Connection', 'port', '9091')
+config.set('Connection', 'host', 'localhost')
+config.set('Connection', 'path', '/transmission/rpc')
+config.set('Connection', 'ssl', 'False')
+config.add_section('Sorting')
+config.set('Sorting', 'order', 'name')
+config.add_section('Filtering')
+config.set('Filtering', 'filter', '')
+config.set('Filtering', 'invert', 'False')
+config.add_section('Misc')
+config.set('Misc', 'compact_list', 'False')
+config.set('Misc', 'torrentname_is_progressbar', 'True')
+config.add_section('Colors')
+config.set('Colors', 'title_seed',       'bg:green,fg:black')
+config.set('Colors', 'title_download',   'bg:blue,fg:black')
+config.set('Colors', 'title_idle',       'bg:cyan,fg:black')
+config.set('Colors', 'title_verify',     'bg:magenta,fg:black')
+config.set('Colors', 'title_paused',     'bg:black,fg:white')
+config.set('Colors', 'download_rate',    'bg:black,fg:blue')
+config.set('Colors', 'upload_rate',      'bg:black,fg:red')
+config.set('Colors', 'eta+ratio',        'bg:black,fg:white')
+config.set('Colors', 'filter_status',    'bg:red,fg:black')
+config.set('Colors', 'dialog',           'bg:black,fg:white')
+config.set('Colors', 'dialog_important', 'bg:red,fg:black')
+config.set('Colors', 'button',           'bg:white,fg:black')
+config.set('Colors', 'button_focused',   'bg:black,fg:white')
+config.set('Colors', 'file_prio_high',   'bg:red,fg:black')
+config.set('Colors', 'file_prio_normal', 'bg:white,fg:black')
+config.set('Colors', 'file_prio_low',    'bg:yellow,fg:black')
+config.set('Colors', 'file_prio_off',    'bg:blue,fg:black')
+
+
+class Normalizer:
+    def __init__(self):
+        self.values = {}
+
+    def add(self, id, value, max):
+        if not id in self.values.keys():
+            self.values[id] = [ float(value) ]
+        else:
+            if len(self.values[id]) >= max:
+                self.values[id].pop(0)
+            self.values[id].append(float(value))
+        return self.get(id)
+
+    def get(self, id):
+        if not id in self.values.keys():
+            return 0.0
+        return sum(self.values[id]) / len(self.values[id])
+
+
+
+authhandler = None
+session_id = 0
+
+# Handle communication with Transmission server.
+class TransmissionRequest:
+    def __init__(self, host, port, path, method=None, tag=None, arguments=None):
+        self.url           = create_url(host, port, path)
+        self.open_request  = None
+        self.last_update   = 0
+        if method and tag:
+            self.set_request_data(method, tag, arguments)
+
+    def set_request_data(self, method, tag, arguments=None):
+        request_data = {'method':method, 'tag':tag}
+        if arguments: request_data['arguments'] = arguments
+        self.http_request = urllib2.Request(url=self.url, data=json.dumps(request_data))
+
+    def send_request(self):
+        """Ask for information from server OR submit command."""
+
+        global session_id
+        try:
+            if session_id:
+                self.http_request.add_header('X-Transmission-Session-Id', session_id)
+            self.open_request = urllib2.urlopen(self.http_request)
+        except AttributeError:
+            # request data (http_request) isn't specified yet -- data will be available on next call
+            pass
+
+        # authentication
+        except urllib2.HTTPError, e:
+            try:
+                msg = html2text(str(e.read()))
+            except:
+                msg = str(e)
+
+            # extract session id and send request again
+            m = re.search('X-Transmission-Session-Id:\s*(\w+)', msg)
+            try:
+                session_id = m.group(1)
+                self.send_request()
+            except AttributeError:
+                quit(str(msg) + "\n", CONNECTION_ERROR)
+
+        except urllib2.URLError, msg:
+            try:
+                reason = msg.reason[1]
+            except IndexError:
+                reason = str(msg.reason)
+            quit("Cannot connect to %s: %s\n" % (self.http_request.host, reason), CONNECTION_ERROR)
+
+    def get_response(self):
+        """Get response to previously sent request."""
+
+        if self.open_request == None:
+            return {'result': 'no open request'}
+        response = self.open_request.read()
+        # work around regression in Python 2.6.5, caused by http://bugs.python.org/issue8797
+        if authhandler:
+            authhandler.retried = 0
+        try:
+            data = json.loads(unicode(response))
+        except ValueError:
+            quit("Cannot parse response: %s\n" % response, JSON_ERROR)
+        self.open_request = None
+        return data
+
+
+# End of Class TransmissionRequest
+
+
+# Higher level of data exchange
+class Transmission:
+    STATUS_STOPPED       = 0   # Torrent is stopped
+    STATUS_CHECK_WAIT    = 1   # Queued to check files
+    STATUS_CHECK         = 2   # Checking files
+    STATUS_DOWNLOAD_WAIT = 3   # Queued to download
+    STATUS_DOWNLOAD      = 4   # Downloading
+    STATUS_SEED_WAIT     = 5   # Queued to seed
+    STATUS_SEED          = 6   # Seeding
+
+    TAG_TORRENT_LIST    = 7
+    TAG_TORRENT_DETAILS = 77
+    TAG_SESSION_STATS   = 21
+    TAG_SESSION_GET     = 22
+
+    LIST_FIELDS = [ 'id', 'name', 'downloadDir', 'status', 'trackerStats', 'desiredAvailable',
+                    'rateDownload', 'rateUpload', 'eta', 'uploadRatio',
+                    'sizeWhenDone', 'haveValid', 'haveUnchecked', 'addedDate',
+                    'uploadedEver', 'errorString', 'recheckProgress',
+                    'peersConnected', 'uploadLimit', 'downloadLimit',
+                    'uploadLimited', 'downloadLimited', 'bandwidthPriority',
+                    'peersSendingToUs', 'peersGettingFromUs',
+                    'seedRatioLimit', 'seedRatioMode', 'isPrivate' ]
+
+    DETAIL_FIELDS = [ 'files', 'priorities', 'wanted', 'peers', 'trackers',
+                      'activityDate', 'dateCreated', 'startDate', 'doneDate',
+                      'totalSize', 'leftUntilDone', 'comment',
+                      'hashString', 'pieceCount', 'pieceSize', 'pieces',
+                      'downloadedEver', 'corruptEver', 'peersFrom' ] + LIST_FIELDS
+
+    def __init__(self, host, port, path, username, password):
+        self.host = host
+        self.port = port
+        self.path = path
+
+        if username and password:
+            password_mgr = urllib2.HTTPPasswordMgrWithDefaultRealm()
+            password_mgr.add_password(None, create_url(host, port, path), username, password)
+            global authhandler
+            authhandler = urllib2.HTTPBasicAuthHandler(password_mgr)
+            opener = urllib2.build_opener(authhandler)
+            urllib2.install_opener(opener)
+
+        # check rpc version
+        request = TransmissionRequest(host, port, path, 'session-get', self.TAG_SESSION_GET)
+        request.send_request()
+        response = request.get_response()
+
+        self.rpc_version = response['arguments']['rpc-version']
+
+        # rpc version too old?
+        version_error = "Unsupported Transmission version: " + str(response['arguments']['version']) + \
+            " -- RPC protocol version: " + str(response['arguments']['rpc-version']) + "\n"
+
+        min_msg = "Please install Transmission version " + TRNSM_VERSION_MIN + " or higher.\n"
+        try:
+            if response['arguments']['rpc-version'] < RPC_VERSION_MIN:
+                quit(version_error + min_msg)
+        except KeyError:
+            quit(version_error + min_msg)
+
+        # rpc version too new?
+        if response['arguments']['rpc-version'] > RPC_VERSION_MAX:
+            quit(version_error + "Please install Transmission version " + TRNSM_VERSION_MAX + " or lower.\n")
+
+        # setup compatibility to Transmission <2.40
+        if self.rpc_version < 14:
+            Transmission.STATUS_CHECK_WAIT    = 1 << 0
+            Transmission.STATUS_CHECK         = 1 << 1
+            Transmission.STATUS_DOWNLOAD_WAIT = 1 << 2
+            Transmission.STATUS_DOWNLOAD      = 1 << 2
+            Transmission.STATUS_SEED_WAIT     = 1 << 3
+            Transmission.STATUS_SEED          = 1 << 3
+            Transmission.STATUS_STOPPED       = 1 << 4
+
+        # set up request list
+        self.requests = {'torrent-list':
+                             TransmissionRequest(host, port, path, 'torrent-get', self.TAG_TORRENT_LIST, {'fields': self.LIST_FIELDS}),
+                         'session-stats':
+                             TransmissionRequest(host, port, path, 'session-stats', self.TAG_SESSION_STATS, 21),
+                         'session-get':
+                             TransmissionRequest(host, port, path, 'session-get', self.TAG_SESSION_GET),
+                         'torrent-details':
+                             TransmissionRequest(host, port, path)}
+
+        self.torrent_cache = []
+        self.status_cache  = dict()
+        self.torrent_details_cache = dict()
+        self.peer_progress_cache   = dict()
+        self.hosts_cache   = dict()
+        self.geo_ips_cache = dict()
+        if features['dns']:   self.resolver = adns.init()
+        if features['geoip']:
+            self.geo_ip = GeoIP.new(GeoIP.GEOIP_MEMORY_CACHE)
+            try:
+                self.geo_ip6 = GeoIP.open_type(GeoIP.GEOIP_COUNTRY_EDITION_V6, GeoIP.GEOIP_MEMORY_CACHE);
+            except AttributeError: self.geo_ip6 = None
+            except GeoIP.error: self.geo_ip6 = None
+
+        # make sure there are no undefined values
+        self.wait_for_torrentlist_update()
+        self.requests['torrent-details'] = TransmissionRequest(self.host, self.port, self.path)
+
+
+    def update(self, delay, tag_waiting_for=0):
+        """Maintain up-to-date data."""
+
+        tag_waiting_for_occurred = False
+
+        for request in self.requests.values():
+            if time.time() - request.last_update >= delay:
+                request.last_update = time.time()
+                response = request.get_response()
+
+                if response['result'] == 'no open request':
+                    request.send_request()
+
+                elif response['result'] == 'success':
+                    tag = self.parse_response(response)
+                    if tag == tag_waiting_for:
+                        tag_waiting_for_occurred = True
+
+        if tag_waiting_for:
+            return tag_waiting_for_occurred
+        else:
+            return None
+
+
+
+    def parse_response(self, response):
+        # response is a reply to torrent-get
+        if response['tag'] == self.TAG_TORRENT_LIST or response['tag'] == self.TAG_TORRENT_DETAILS:
+            for t in response['arguments']['torrents']:
+                t['uploadRatio'] = round(float(t['uploadRatio']), 2)
+                t['percentDone'] = percent(float(t['sizeWhenDone']),
+                                           float(t['haveValid'] + t['haveUnchecked']))
+                t['available'] = t['desiredAvailable'] + t['haveValid'] + t['haveUnchecked']
+                if t['downloadDir'][-1] != '/':
+                    t['downloadDir'] += '/'
+                try:
+                    t['seeders']  = max(map(lambda x: x['seederCount'],  t['trackerStats']))
+                    t['leechers'] = max(map(lambda x: x['leecherCount'], t['trackerStats']))
+                except ValueError:
+                    t['seeders']  = t['leechers'] = -1
+
+            if response['tag'] == self.TAG_TORRENT_LIST:
+                self.torrent_cache = response['arguments']['torrents']
+
+            elif response['tag'] == self.TAG_TORRENT_DETAILS:
+                # torrent list may be empty sometimes after deleting
+                # torrents.  no idea why and why the server sends us
+                # TAG_TORRENT_DETAILS, but just passing seems to help.(?)
+                try:
+                    torrent_details = response['arguments']['torrents'][0]
+                    torrent_details['pieces'] = base64.decodestring(torrent_details['pieces'])
+                    self.torrent_details_cache = torrent_details
+                    self.upgrade_peerlist()
+                except IndexError:
+                    pass
+
+        elif response['tag'] == self.TAG_SESSION_STATS:
+            self.status_cache.update(response['arguments'])
+
+        elif response['tag'] == self.TAG_SESSION_GET:
+            self.status_cache.update(response['arguments'])
+
+        return response['tag']
+
+    def upgrade_peerlist(self):
+        for index,peer in enumerate(self.torrent_details_cache['peers']):
+            ip = peer['address']
+            peerid = ip + self.torrent_details_cache['hashString']
+
+            # make sure peer cache exists
+            if not self.peer_progress_cache.has_key(peerid):
+                self.peer_progress_cache[peerid] = {'last_progress':peer['progress'], 'last_update':time.time(),
+                                                    'download_speed':0, 'time_left':0}
+
+            # estimate how fast a peer is downloading
+            if peer['progress'] < 1:
+                this_time = time.time()
+                time_diff = this_time - self.peer_progress_cache[peerid]['last_update']
+                progress_diff = peer['progress'] - self.peer_progress_cache[peerid]['last_progress']
+                if self.peer_progress_cache[peerid]['last_progress'] and progress_diff > 0 and time_diff > 5:
+                    downloaded = self.torrent_details_cache['totalSize'] * progress_diff
+                    avg_speed  = downloaded / time_diff
+
+                    if self.peer_progress_cache[peerid]['download_speed'] > 0:  # make it less jumpy
+                        avg_speed = (self.peer_progress_cache[peerid]['download_speed'] + avg_speed) /2
+
+                    download_left = self.torrent_details_cache['totalSize'] - \
+                        (self.torrent_details_cache['totalSize']*peer['progress'])
+                    time_left  = download_left / avg_speed
+
+                    self.peer_progress_cache[peerid]['last_update']    = this_time  # remember update time
+                    self.peer_progress_cache[peerid]['download_speed'] = avg_speed
+                    self.peer_progress_cache[peerid]['time_left']      = time_left
+
+                self.peer_progress_cache[peerid]['last_progress'] = peer['progress']  # remember progress
+            self.torrent_details_cache['peers'][index].update(self.peer_progress_cache[peerid])
+
+            # resolve and locate peer's ip
+            if features['dns'] and not self.hosts_cache.has_key(ip):
+                try:
+                    self.hosts_cache[ip] = self.resolver.submit_reverse(ip, adns.rr.PTR)
+                except adns.Error:
+                    pass
+            if features['geoip'] and not self.geo_ips_cache.has_key(ip):
+                self.geo_ips_cache[ip] = country_code_by_addr_vany(self.geo_ip, self.geo_ip6, ip)
+                if self.geo_ips_cache[ip] == None:
+                    self.geo_ips_cache[ip] = '?'
+
+    def get_rpc_version(self):
+        return self.rpc_version
+
+    def get_global_stats(self):
+        return self.status_cache
+
+    def get_torrent_list(self, sort_orders):
+        try:
+            for sort_order in sort_orders:
+                if isinstance(self.torrent_cache[0][sort_order['name']], (str, unicode)):
+                    self.torrent_cache.sort(key=lambda x: x[sort_order['name']].lower(),
+                                            reverse=sort_order['reverse'])
+                else:
+                    self.torrent_cache.sort(key=lambda x: x[sort_order['name']],
+                                            reverse=sort_order['reverse'])
+        except IndexError:
+            return []
+        return self.torrent_cache
+
+    def get_torrent_by_id(self, id):
+        i = 0
+        while self.torrent_cache[i]['id'] != id:  i += 1
+        if self.torrent_cache[i]['id'] == id:
+            return self.torrent_cache[i]
+        else:
+            return None
+
+
+    def get_torrent_details(self):
+        return self.torrent_details_cache
+    def set_torrent_details_id(self, id):
+        if id < 0:
+            self.requests['torrent-details'] = TransmissionRequest(self.host, self.port, self.path)
+        else:
+            self.requests['torrent-details'].set_request_data('torrent-get', self.TAG_TORRENT_DETAILS,
+                                                              {'ids':id, 'fields': self.DETAIL_FIELDS})
+
+    def get_hosts(self):
+        return self.hosts_cache
+
+    def get_geo_ips(self):
+        return self.geo_ips_cache
+
+
+    def set_option(self, option_name, option_value):
+        request = TransmissionRequest(self.host, self.port, self.path, 'session-set', 1, {option_name: option_value})
+        request.send_request()
+        self.wait_for_status_update()
+
+
+    def set_rate_limit(self, direction, new_limit, torrent_id=-1):
+        data = dict()
+        if new_limit <= -1:
+            new_limit     = None
+            limit_enabled = False
+        else:
+            limit_enabled = True
+
+        if torrent_id < 0:
+            type = 'session-set'
+            data['speed-limit-'+direction]            = new_limit
+            data['speed-limit-'+direction+'-enabled'] = limit_enabled
+        else:
+            type = 'torrent-set'
+            data['ids'] = [torrent_id]
+            data[direction+'loadLimit']   = new_limit
+            data[direction+'loadLimited'] = limit_enabled
+
+        request = TransmissionRequest(self.host, self.port, self.path, type, 1, data)
+        request.send_request()
+        self.wait_for_torrentlist_update()
+
+
+    def set_seed_ratio(self, ratio, torrent_id=-1):
+        data = dict()
+        if ratio == -1:
+            ratio = None
+            mode  = 0   # Use global settings
+        elif ratio == 0:
+            ratio = None
+            mode  = 2   # Seed regardless of ratio
+        elif ratio >= 0:
+            mode  = 1   # Stop seeding at seedRatioLimit
+        else:
+            return
+
+        data['ids']            = [torrent_id]
+        data['seedRatioLimit'] = ratio
+        data['seedRatioMode']  = mode
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-set', 1, data)
+        request.send_request()
+        self.wait_for_torrentlist_update()
+
+
+    def increase_bandwidth_priority(self, torrent_id):
+        torrent = self.get_torrent_by_id(torrent_id)
+        if torrent == None or torrent['bandwidthPriority'] >= 1:
+            return False
+        else:
+            new_priority = torrent['bandwidthPriority'] + 1
+            request = TransmissionRequest(self.host, self.port, self.path, 'torrent-set', 1,
+                                          {'ids': [torrent_id], 'bandwidthPriority':new_priority})
+            request.send_request()
+            self.wait_for_torrentlist_update()
+
+    def decrease_bandwidth_priority(self, torrent_id):
+        torrent = self.get_torrent_by_id(torrent_id)
+        if torrent == None or torrent['bandwidthPriority'] <= -1:
+            return False
+        else:
+            new_priority = torrent['bandwidthPriority'] - 1
+            request = TransmissionRequest(self.host, self.port, self.path, 'torrent-set', 1,
+                                          {'ids': [torrent_id], 'bandwidthPriority':new_priority})
+            request.send_request()
+            self.wait_for_torrentlist_update()
+
+
+    def toggle_turtle_mode(self):
+        self.set_option('alt-speed-enabled', not self.status_cache['alt-speed-enabled'])
+
+
+    def add_torrent(self, location):
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-add', 1, {'filename': location})
+        request.send_request()
+        response = request.get_response()
+        if response['result'] != 'success':
+            return response['result']
+        else:
+            return ''
+
+    def stop_torrent(self, id):
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-stop', 1, {'ids': [id]})
+        request.send_request()
+        self.wait_for_torrentlist_update()
+
+    def start_torrent(self, id):
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-start', 1, {'ids': [id]})
+        request.send_request()
+        self.wait_for_torrentlist_update()
+
+    def verify_torrent(self, id):
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-verify', 1, {'ids': [id]})
+        request.send_request()
+        self.wait_for_torrentlist_update()
+
+    def reannounce_torrent(self, id):
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-reannounce', 1, {'ids': [id]})
+        request.send_request()
+        self.wait_for_torrentlist_update()
+
+    def move_torrent(self, torrent_id, new_location):
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-set-location', 1,
+                                      {'ids': torrent_id, 'location': new_location, 'move': True})
+        request.send_request()
+        self.wait_for_torrentlist_update()
+
+    def remove_torrent(self, id):
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-remove', 1, {'ids': [id]})
+        request.send_request()
+        self.wait_for_torrentlist_update()
+
+    def remove_torrent_local_data(self, id):
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-remove', 1, {'ids': [id], 'delete-local-data':True})
+        request.send_request()
+        self.wait_for_torrentlist_update()
+
+    def add_torrent_tracker(self, id, tracker):
+        data = { 'ids' : [id],
+                 'trackerAdd' : [tracker] }
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-set', 1, data)
+        request.send_request()
+        response = request.get_response()
+        return response['result'] if response['result'] != 'success' else ''
+
+    def remove_torrent_tracker(self, id, tracker):
+        data = { 'ids' : [id],
+                 'trackerRemove' : [tracker] }
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-set', 1, data)
+        request.send_request()
+        response = request.get_response()
+        self.wait_for_torrentlist_update()
+        return response['result'] if response['result'] != 'success' else ''
+
+    def increase_file_priority(self, file_nums):
+        file_nums = list(file_nums)
+        ref_num = file_nums[0]
+        for num in file_nums:
+            if not self.torrent_details_cache['wanted'][num]:
+                ref_num = num
+                break
+            elif self.torrent_details_cache['priorities'][num] < \
+                    self.torrent_details_cache['priorities'][ref_num]:
+                ref_num = num
+        current_priority = self.torrent_details_cache['priorities'][ref_num]
+        if not self.torrent_details_cache['wanted'][ref_num]:
+            self.set_file_priority(self.torrent_details_cache['id'], file_nums, 'low')
+        elif current_priority == -1:
+            self.set_file_priority(self.torrent_details_cache['id'], file_nums, 'normal')
+        elif current_priority == 0:
+            self.set_file_priority(self.torrent_details_cache['id'], file_nums, 'high')
+
+    def decrease_file_priority(self, file_nums):
+        file_nums = list(file_nums)
+        ref_num = file_nums[0]
+        for num in file_nums:
+            if self.torrent_details_cache['priorities'][num] > \
+                    self.torrent_details_cache['priorities'][ref_num]:
+                ref_num = num
+        current_priority = self.torrent_details_cache['priorities'][ref_num]
+        if current_priority >= 1:
+            self.set_file_priority(self.torrent_details_cache['id'], file_nums, 'normal')
+        elif current_priority == 0:
+            self.set_file_priority(self.torrent_details_cache['id'], file_nums, 'low')
+        elif current_priority == -1:
+            self.set_file_priority(self.torrent_details_cache['id'], file_nums, 'off')
+
+
+    def set_file_priority(self, torrent_id, file_nums, priority):
+        request_data = {'ids': [torrent_id]}
+        if priority == 'off':
+            request_data['files-unwanted'] = file_nums
+        else:
+            request_data['files-wanted'] = file_nums
+            request_data['priority-' + priority] = file_nums
+        request = TransmissionRequest(self.host, self.port, self.path, 'torrent-set', 1, request_data)
+        request.send_request()
+        self.wait_for_details_update()
+
+    def get_file_priority(self, torrent_id, file_num):
+        priority = self.torrent_details_cache['priorities'][file_num]
+        if not self.torrent_details_cache['wanted'][file_num]: return 'off'
+        elif priority <= -1: return 'low'
+        elif priority == 0:  return 'normal'
+        elif priority >= 1:  return 'high'
+        return '?'
+
+    def wait_for_torrentlist_update(self):
+        self.wait_for_update(7)
+    def wait_for_details_update(self):
+        self.wait_for_update(77)
+    def wait_for_status_update(self):
+        self.wait_for_update(22)
+    def wait_for_update(self, update_id):
+        self.update(0) # send request
+        while True:    # wait for response
+            if self.update(0, update_id): break
+            time.sleep(0.1)
+
+    def get_status(self, torrent):
+        if torrent['status'] == Transmission.STATUS_STOPPED:
+            status = 'paused'
+        elif torrent['status'] == Transmission.STATUS_CHECK:
+            status = 'verifying'
+        elif torrent['status'] == Transmission.STATUS_CHECK_WAIT:
+            status = 'will verify'
+        elif torrent['status'] == Transmission.STATUS_DOWNLOAD:
+            status = ('idle','downloading')[torrent['rateDownload'] > 0]
+        elif torrent['status'] == Transmission.STATUS_DOWNLOAD_WAIT:
+            status = 'will download'
+        elif torrent['status'] == Transmission.STATUS_SEED:
+            status = 'seeding'
+        elif torrent['status'] == Transmission.STATUS_SEED_WAIT:
+            status = 'will seed'
+        else:
+            status = 'unknown state'
+        return status
+
+    def get_bandwidth_priority(self, torrent):
+        if torrent['bandwidthPriority'] == -1:
+            return '-'
+        elif torrent['bandwidthPriority'] == 0:
+            return ' '
+        elif torrent['bandwidthPriority'] == 1:
+            return '+'
+        else:
+            return '?'
+
+# End of Class Transmission
+
+
+
+
+
+
+def percent(full, part):
+    try: percent = 100/(float(full) / float(part))
+    except ZeroDivisionError: percent = 0.0
+    return percent
+
+
+def scale_time(seconds, type='short'):
+    minute_in_sec = float(60)
+    hour_in_sec   = float(3600)
+    day_in_sec    = float(86400)
+    month_in_sec  = 27.321661 * day_in_sec # from wikipedia
+    year_in_sec   = 365.25    * day_in_sec # from wikipedia
+
+    if seconds < 0:
+        return ('?', 'some time')[type=='long']
+
+    elif seconds < minute_in_sec:
+        if type == 'long':
+            if seconds < 5:
+                return 'now'
+            else:
+                return "%d second%s" % (seconds, ('', 's')[seconds>1])
+        else:
+            return "%ds" % seconds
+
+    elif seconds < hour_in_sec:
+        minutes = round(seconds / minute_in_sec, 0)
+        if type == 'long':
+            return "%d minute%s" % (minutes, ('', 's')[minutes>1])
+        else:
+            return "%dm" % minutes
+
+    elif seconds < day_in_sec:
+        hours = round(seconds / hour_in_sec, 0)
+        if type == 'long':
+            return "%d hour%s" % (hours, ('', 's')[hours>1])
+        else:
+            return "%dh" % hours
+
+    elif seconds < month_in_sec:
+        days = round(seconds / day_in_sec, 0)
+        if type == 'long':
+            return "%d day%s" % (days, ('', 's')[days>1])
+        else:
+            return "%dd" % days
+
+    elif seconds < year_in_sec:
+        months = round(seconds / month_in_sec, 0)
+        if type == 'long':
+            return "%d month%s" % (months, ('', 's')[months>1])
+        else:
+            return "%dM" % months
+
+    else:
+        years = round(seconds / year_in_sec, 0)
+        if type == 'long':
+            return "%d year%s" % (years, ('', 's')[years>1])
+        else:
+            return "%dy" % years
+
+
+def timestamp(timestamp, format="%x %X"):
+    if timestamp < 1:
+        return 'never'
+
+    absolute = time.strftime(format, time.localtime(timestamp))
+    if timestamp > time.time():
+        relative = 'in ' + scale_time(int(timestamp - time.time()), 'long')
+    else:
+        relative = scale_time(int(time.time() - timestamp), 'long') + ' ago'
+
+    if relative.startswith('now') or relative.endswith('now'):
+        relative = 'now'
+    return "%s (%s)" % (absolute, relative)
+
+
+def scale_bytes(bytes, type='short'):
+    if bytes >= 1073741824:
+        scaled_bytes = round((bytes / 1073741824.0), 2)
+        unit = 'G'
+    elif bytes >= 1048576:
+        scaled_bytes = round((bytes / 1048576.0), 1)
+        if scaled_bytes >= 100:
+            scaled_bytes = int(scaled_bytes)
+        unit = 'M'
+    elif bytes >= 1024:
+        scaled_bytes = int(bytes / 1024)
+        unit = 'K'
+    else:
+        scaled_bytes = round((bytes / 1024.0), 1)
+        unit = 'K'
+
+
+    # handle 0 bytes special
+    if bytes == 0 and type == 'long':
+        return 'nothing'
+
+    # convert to integer if .0
+    if int(scaled_bytes) == float(scaled_bytes):
+        scaled_bytes = str(int(scaled_bytes))
+    else:
+        scaled_bytes = str(scaled_bytes).rstrip('0')
+
+    if type == 'long':
+        return num2str(bytes) + ' [' + scaled_bytes + unit + ']'
+    else:
+        return scaled_bytes + unit
+
+
+def homedir2tilde(path):
+    return re.sub(r'^'+os.environ['HOME'], '~', path)
+def tilde2homedir(path):
+    return re.sub(r'^~', os.environ['HOME'], path)
+
+def html2text(str):
+    str = re.sub(r'</h\d+>', "\n", str)
+    str = re.sub(r'</p>', ' ', str)
+    str = re.sub(r'<[^>]*?>', '', str)
+    return str
+
+def hide_cursor():
+    try: curses.curs_set(0)   # hide cursor if possible
+    except curses.error: pass # some terminals seem to have problems with that
+def show_cursor():
+    try: curses.curs_set(1)
+    except curses.error: pass
+
+def wrap_multiline(text, width, initial_indent='', subsequent_indent=None):
+    if subsequent_indent is None:
+        subsequent_indent = ' ' * len(initial_indent)
+    for line in text.splitlines():
+        # this is required because wrap() strips empty lines
+        if not line.strip():
+            yield line
+            continue
+        for line in wrap(line, width, replace_whitespace=False,
+                initial_indent=initial_indent, subsequent_indent=subsequent_indent):
+            yield line
+        initial_indent = subsequent_indent
+
+def ljust_columns(text, max_width, padchar=' '):
+    """ Returns a string that is exactly <max_width> display columns wide,
+    padded with <padchar> if necessary. Accounts for characters that are
+    displayed two columns wide, i.e. kanji. """
+
+    chars = []
+    columns = 0
+    max_width = max(0, max_width)
+    for character in text:
+        width = len_columns(character)
+        if columns + width <= max_width:
+            chars.append(character)
+            columns += width
+        else:
+            break
+
+    # Fill up any remaining space
+    while columns < max_width:
+        assert len(padchar) == 1
+        chars.append(padchar)
+        columns += 1
+    return ''.join(chars)
+
+def len_columns(text):
+    """ Returns the amount of columns that <text> would occupy. """
+    columns = 0
+    for character in text:
+        columns += 2 if unicodedata.east_asian_width(character) in ('W', 'F') else 1
+    return columns
+
+
+def num2str(num, format='%s'):
+    if int(num) == -1:
+        return '?'
+    elif int(num) == -2:
+        return 'oo'
+    else:
+        if num > 999:
+            return (re.sub(r'(\d{3})', '\g<1>,', str(num)[::-1])[::-1]).lstrip(',')
+        else:
+            return format % num
+
+
+def debug(data):
+    if cmd_args.DEBUG:
+        file = open("debug.log", 'a')
+        if type(data) == type(str()):
+            file.write(data.encode('utf-8'))
+        else:
+            import pprint
+            pp = pprint.PrettyPrinter(indent=4)
+            file.write("\n====================\n" + pp.pformat(data) + "\n====================\n\n")
+        file.close
+
+def quit(msg='', exitcode=0):
+    if CURSES_AVAILABLE:
+      try:
+          curses.endwin()
+      except curses.error:
+          pass
+
+    # if this is a graceful exit and config file is present
+    if not msg and not exitcode:
+        save_config(cmd_args.configfile)
+    else:
+        print >> sys.stderr, msg,
+    #os._exit(exitcode)
+    raise Exception("Can't connect")
+
+
+def explode_connection_string(connection):
+    host, port, path = \
+        config.get('Connection', 'host'), \
+        config.getint('Connection', 'port'),  \
+        config.get('Connection', 'path')
+    username, password = \
+        config.get('Connection', 'username'), \
+        config.get('Connection', 'password')
+    try:
+        if connection.count('@') == 1:
+            auth, connection = connection.split('@')
+            if auth.count(':') == 1:
+                username, password = auth.split(':')
+        if connection.count(':') == 1:
+            host, port = connection.split(':')
+            if port.count('/') >= 1:
+                port, path = port.split('/', 1)
+            port = int(port)
+        else:
+            host = connection
+    except ValueError:
+        quit("Wrong connection pattern: %s\n" % connection)
+    return host, port, path, username, password
+
+def create_url(host, port, path):
+    url = '%s:%d/%s' % (host, port, path)
+    url = url.replace('//', '/')   # double-/ doesn't work for some reason
+    if config.getboolean('Connection', 'ssl'):
+        return 'https://%s' % url
+    else:
+        return 'http://%s' % url
+
+def read_netrc(file=os.environ['HOME'] + '/.netrc', hostname=None):
+    try:
+        login = password = ''
+        try:
+            login, account, password = netrc.netrc(file).authenticators(hostname)
+        except TypeError:
+            pass
+        try:
+            netrc.netrc(file).hosts[hostname]
+        except KeyError:
+            if hostname != 'localhost':
+                print "Unknown machine in %s: %s" % (file, hostname)
+                if login and password:
+                    print "Using default login: %s" % login
+                else:
+                    exit(CONFIGFILE_ERROR)
+    except netrc.NetrcParseError, e:
+        quit("Error in %s at line %s: %s\n" % (e.filename, e.lineno, e.msg))
+    except IOError, msg:
+        quit("Cannot read %s: %s\n" % (file, msg))
+    return login, password
+
+
+# create initial config file
+def create_config(option, opt_str, value, parser):
+    configfile = parser.values.configfile
+    config.read(configfile)
+    if parser.values.connection:
+        host, port, path, username, password = explode_connection_string(parser.values.connection)
+        config.set('Connection', 'host', host)
+        config.set('Connection', 'port', str(port))
+        config.set('Connection', 'path', path)
+        config.set('Connection', 'username', username)
+        config.set('Connection', 'password', password)
+
+    # create directory if necessary
+    dir = os.path.dirname(configfile)
+    if dir != '' and not os.path.isdir(dir):
+        try:
+            os.makedirs(dir)
+        except OSError, msg:
+            print msg
+            exit(CONFIGFILE_ERROR)
+
+    # write file
+    if not save_config(configfile, force=True):
+        exit(CONFIGFILE_ERROR)
+    print "Wrote config file: %s" % configfile
+    exit(0)
+
+def save_config(filepath, force=False):
+    if force or os.path.isfile(filepath):
+        try:
+            config.write(open(filepath, 'w'))
+            os.chmod(filepath, 0600)  # config may contain password
+            return 1
+        except IOError, msg:
+            print >> sys.stderr, "Cannot write config file %s:\n%s" % (filepath, msg)
+            return 0
+    return -1
+
+def parse_sort_str(sort_str):
+    sort_orders = []
+    for i in sort_str.split(','):
+        x = i.split(':') 
+        if len(x) > 1:
+            sort_orders.append( { 'name':x[1], 'reverse':True } )
+        else:
+            sort_orders.append( { 'name':x[0], 'reverse':False } )
+    return sort_orders
+
+def show_version(option, opt_str, value, parser):
+    quit("transmission-remote-cli %s  (supports Transmission %s-%s)\n" % \
+         (VERSION, TRNSM_VERSION_MIN, TRNSM_VERSION_MAX))
+
+
+if __name__ == '__main__':
+    # command line parameters
+    default_config_path = os.environ['HOME'] + '/.config/transmission-remote-cli/settings.cfg'
+    parser = OptionParser(usage="%prog [options] [-- transmission-remote options]",
+                          description="%%prog %s" % VERSION)
+    parser.add_option("-v", "--version", action="callback", callback=show_version,
+                      help="Show version number and supported Transmission versions.")
+    parser.add_option("-c", "--connect", action="store", dest="connection", default="",
+                      help="Point to the server using pattern [username:password@]host[:port]/[path]")
+    parser.add_option("-s", "--ssl", action="store_true", dest="ssl", default=False,
+                      help="Connect to Transmission using SSL.")
+    parser.add_option("-f", "--config", action="store", dest="configfile", default=default_config_path,
+                      help="Path to configuration file.")
+    parser.add_option("--create-config", action="callback", callback=create_config,
+                      help="Create configuration file CONFIGFILE with default values.")
+    parser.add_option("-n", "--netrc", action="store_true", dest="use_netrc", default=False,
+                      help="Get authentication info from your ~/.netrc file.")
+    parser.add_option("--debug", action="store_true", dest="DEBUG", default=False,
+                      help="Everything passed to the debug() function will be added to the file debug.log.")
+    (cmd_args, transmissionremote_args) = parser.parse_args()
+
+
+    # read config from config file
+    config.read(cmd_args.configfile)
+
+    # command line connection data can override config file
+    if cmd_args.connection:
+        host, port, path, username, password = explode_connection_string(cmd_args.connection)
+        config.set('Connection', 'host', host)
+        config.set('Connection', 'port', str(port))
+        config.set('Connection', 'path', path)
+        config.set('Connection', 'username', username)
+        config.set('Connection', 'password', password)
+    if cmd_args.use_netrc:
+        username, password = read_netrc(hostname=config.get('Connection','host'))
+        config.set('Connection', 'username', username)
+        config.set('Connection', 'password', password)
+    if cmd_args.ssl:
+        config.set('Connection', 'ssl', 'True')
+
+
+
+    # forward arguments after '--' to transmission-remote
+    if transmissionremote_args:
+        cmd = ['transmission-remote', '%s:%s' %
+               (config.get('Connection', 'host'), config.get('Connection', 'port'))]
+
+        # one argument and it doesn't start with '-' --> treat it like it's a torrent link/url
+        if len(transmissionremote_args) == 1 and not transmissionremote_args[0].startswith('-'):
+            cmd.extend(['-a', transmissionremote_args[0]])
+
+        if config.get('Connection', 'username') and config.get('Connection', 'password'):
+            cmd_print = cmd
+            cmd_print.extend(['--auth', '%s:PASSWORD' % config.get('Connection', 'username')])
+            print "EXECUTING:\n%s\nRESPONSE:" % ' '.join(cmd_print)
+            cmd.extend(['--auth', '%s:%s' % (config.get('Connection', 'username'), config.get('Connection', 'password'))])
+            cmd.extend(transmissionremote_args)
+        else:
+            print "EXECUTING:\n%s\nRESPONSE:" % ' '.join(cmd)
+
+        try:
+            retcode = call(cmd)
+        except OSError, msg:
+            quit("Could not execute the above command: %s\n" % msg, 128)
+        quit('', retcode)
+
+
+    norm = Normalizer()
+    server = Transmission(config.get('Connection', 'host'),
+                          config.getint('Connection', 'port'),
+                          config.get('Connection', 'path'),
+                          config.get('Connection', 'username'),
+                          config.get('Connection', 'password'))
+    Interface()
+
