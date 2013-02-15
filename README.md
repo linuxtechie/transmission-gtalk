@@ -1,6 +1,9 @@
 ## About
 
-A transmission chatter!
+A transmission chatter and transmission manager:
+
+1. Responds to queries via xmpp.
+2. Automatically removes torrent once the download is complete.
 
 ## Requirements
 
@@ -44,6 +47,32 @@ This command will immediately return indicating the process has become daemon. Y
 ## Commands:
 
 .help 
+
+Prints help according to err.
+
+.help Magnet
+
+Prints help pertaining to transmission.
+
+.add torrent <torrent URL/magnet string>
+
+Adds torrents
+
+.list torrent(s)
+
+List all the torrents
+
+.start torrent <id>
+
+Start torrent according to the id that was available via .list torrents
+
+.stop torrent <id>
+
+Stops the torrent with id.
+
+.stop torrents
+
+Stops all the torrents
 
 ## Copyright
 
