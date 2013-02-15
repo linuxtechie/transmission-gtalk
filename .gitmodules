@@ -1,0 +1,3 @@
+[submodule "err"]
+	path = err
+	url = https://github.com/linuxtechie/err.git
